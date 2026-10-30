@@ -1,33 +1,119 @@
+import re
+
 from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen, QTextBlockFormat, QTextCursor, QTextDocument, QTextImageFormat, QTextListFormat
+from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QDesktopServices, QFont, QImage, QPainter, QPen, QTextCursor, QTextDocument, QTextImageFormat
 from PySide6.QtWidgets import QFrame, QLineEdit, QTextEdit, QVBoxLayout
 
 from notebook_app.model import Page
 
 
 class PageEditor(QTextEdit):
+    imagePasted = Signal(object, bytes)
+    imageDoubleClicked = Signal(str)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.setAcceptDrops(True)
+
+    def scrollContentsBy(self, dx: int, dy: int) -> None:
+        # A paper page has a fixed writing area. Overflow is moved to the next page.
+        return
+
     def keyPressEvent(self, event) -> None:
-        if event.text() == " ":
-            cursor = self.textCursor()
-            block = cursor.block()
-            prefix = block.text()[: cursor.positionInBlock()]
-            if prefix in ("#", "##", "###", "-"):
-                cursor.setPosition(block.position())
-                cursor.setPosition(block.position() + len(prefix), QTextCursor.MoveMode.KeepAnchor)
-                cursor.removeSelectedText()
-                if prefix == "-":
-                    cursor.createList(QTextListFormat.Style.ListDisc)
-                else:
-                    block_format = QTextBlockFormat()
-                    block_format.setHeadingLevel(len(prefix))
-                    cursor.setBlockFormat(block_format)
-                self.setTextCursor(cursor)
-                return
         super().keyPressEvent(event)
+        if event.text() == ")":
+            self._format_typed_link()
+
+    def _format_typed_link(self) -> None:
+        cursor = self.textCursor()
+        block = cursor.block()
+        match = re.search(r"\[([^\]]+)\]\(([^)]+)\)$", block.text()[: cursor.positionInBlock()])
+        if not match:
+            return
+        start = block.position() + match.start()
+        end = block.position() + match.end()
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+        label, url = match.group(1), match.group(2)
+        cursor.insertText(label)
+        cursor.setPosition(start)
+        cursor.setPosition(start + len(label), QTextCursor.MoveMode.KeepAnchor)
+        from PySide6.QtGui import QTextCharFormat
+        fmt = QTextCharFormat()
+        fmt.setAnchor(True)
+        fmt.setAnchorHref(url)
+        fmt.setForeground(QColor("#1769aa"))
+        fmt.setUnderlineStyle(QTextCharFormat.UnderlineStyle.SingleUnderline)
+        cursor.mergeCharFormat(fmt)
+        cursor.setPosition(start + len(label))
+        self.setTextCursor(cursor)
+        reset = QTextCharFormat()
+        reset.setAnchor(False)
+        reset.setForeground(QColor("#26322f"))
+        reset.setUnderlineStyle(QTextCharFormat.UnderlineStyle.NoUnderline)
+        self.setCurrentCharFormat(reset)
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            cursor = self.cursorForPosition(event.position().toPoint())
+            url = cursor.charFormat().anchorHref()
+            if url:
+                QDesktopServices.openUrl(QUrl(url))
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def insertFromMimeData(self, source) -> None:
+        if source.hasImage():
+            image = source.imageData()
+            if isinstance(image, QImage) and not image.isNull():
+                from PySide6.QtCore import QBuffer, QByteArray, QIODevice
+                payload = QByteArray()
+                buffer = QBuffer(payload)
+                buffer.open(QIODevice.OpenModeFlag.WriteOnly)
+                image.save(buffer, "PNG")
+                buffer.close()
+                self.imagePasted.emit(image, bytes(payload))
+                return
+        super().insertFromMimeData(source)
+
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        if event.mimeData().hasImage() or event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dropEvent(self, event: QDropEvent) -> None:
+        if event.mimeData().hasImage():
+            self.insertFromMimeData(event.mimeData())
+            event.acceptProposedAction()
+            return
+        for url in event.mimeData().urls():
+            if url.isLocalFile():
+                image = QImage(url.toLocalFile())
+                if not image.isNull():
+                    from pathlib import Path
+                    self.imagePasted.emit(image, Path(url.toLocalFile()).read_bytes())
+                    event.acceptProposedAction()
+                    return
+        super().dropEvent(event)
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        cursor = self.cursorForPosition(event.position().toPoint())
+        char_format = cursor.charFormat()
+        if char_format.isImageFormat():
+            name = QUrl(char_format.toImageFormat().name()).path().strip("/")
+            if not name:
+                name = char_format.toImageFormat().name().split(":")[-1]
+            self.imageDoubleClicked.emit(name)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
 
 class PageWidget(QFrame):
     changed = Signal()
+    contextMenuRequested = Signal(object)
 
     def __init__(self, page: Page, number: int, paper_style: str, images: dict[str, bytes]) -> None:
         super().__init__()
@@ -49,13 +135,19 @@ class PageWidget(QFrame):
         self.body_edit.setPlaceholderText("开始写作...")
         self.body_edit.setFrameShape(QFrame.Shape.NoFrame)
         self.body_edit.setObjectName("pageBody")
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.title_edit.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.body_edit.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(lambda point: self.contextMenuRequested.emit(self.mapToGlobal(point)))
+        self.title_edit.customContextMenuRequested.connect(lambda point: self.contextMenuRequested.emit(self.title_edit.mapToGlobal(point)))
+        self.body_edit.customContextMenuRequested.connect(lambda point: self.contextMenuRequested.emit(self.body_edit.mapToGlobal(point)))
+        self.body_edit.setMarkdown(page.body)
         for name, data in images.items():
             image = QImage.fromData(data)
             if not image.isNull():
                 self.body_edit.document().addResource(
                     QTextDocument.ResourceType.ImageResource, QUrl(f"book-image:{name}"), image
                 )
-        self.body_edit.setMarkdown(page.body)
         layout.addWidget(self.title_edit)
         layout.addWidget(self.body_edit, 1)
         self.number = number

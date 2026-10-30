@@ -3,9 +3,9 @@ from uuid import uuid4
 from zipfile import BadZipFile
 
 from PySide6.QtCore import QPropertyAnimation, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QFont, QImage, QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument, QTextDocumentFragment, QTextListFormat
+from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPixmap, QTextCharFormat, QTextCursor, QTextDocument, QTextDocumentFragment, QTextListFormat
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QFileDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QInputDialog,
+    QApplication, QComboBox, QDialog, QFileDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QInputDialog,
     QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton,
     QSplitter, QToolBar, QVBoxLayout, QWidget,
 )
@@ -13,6 +13,51 @@ from PySide6.QtWidgets import (
 from notebook_app.model import Book, Page
 from notebook_app.page import PageWidget
 from notebook_app.storage import MAX_IMAGE_BYTES, load_book, save_book
+
+
+class ImagePreviewDialog(QDialog):
+    def __init__(self, image: QImage, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setModal(True)
+        self.resize(parent.size() if parent else image.size())
+        self.image_label = QLabel(self)
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_label.setStyleSheet("background: #fffdf7; border: 1px solid #d5d8ce;")
+        self.image_label.setPixmap(QPixmap.fromImage(image))
+        self.image_label.adjustSize()
+        self._image = image
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        available = self.size()
+        pixmap = QPixmap.fromImage(self._image).scaled(
+            max(1, available.width() - 80), max(1, available.height() - 80),
+            Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation,
+        )
+        self.image_label.setPixmap(pixmap)
+        self.image_label.setGeometry(
+            (self.width() - pixmap.width()) // 2 - 40,
+            (self.height() - pixmap.height()) // 2 - 40,
+            pixmap.width() + 80, pixmap.height() + 80,
+        )
+
+    def paintEvent(self, event) -> None:
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor(0, 0, 0, 130))
+
+    def mousePressEvent(self, event) -> None:
+        if not self.image_label.geometry().contains(event.position().toPoint()):
+            self.close()
+            return
+        super().mousePressEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() in (Qt.Key.Key_Escape, Qt.Key.Key_Return, Qt.Key.Key_Space):
+            self.close()
+            return
+        super().keyPressEvent(event)
 
 
 class NotebookWindow(QMainWindow):
@@ -52,37 +97,7 @@ class NotebookWindow(QMainWindow):
                         font-family: 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif; font-size: 15px; }
             #statusStrip { background: #192a27; color: #e0e9e2; }
         """)
-        toolbar = QToolBar("编辑")
-        toolbar.setMovable(False)
-        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-        self.addToolBar(toolbar)
-        for label, shortcut, callback in (
-            ("新建", "Ctrl+N", self.new_book), ("打开", "Ctrl+O", self.open_book),
-            ("保存", "Ctrl+S", self.save_book),
-            ("另存为", "Ctrl+Shift+S", self.save_book_as),
-        ):
-            self._action(toolbar, label, shortcut, callback)
-        toolbar.addSeparator()
-        for label, shortcut, callback in (
-            ("B", "Ctrl+B", lambda: self._format_char("bold")),
-            ("I", "Ctrl+I", lambda: self._format_char("italic")),
-            ("标题", "Ctrl+1", self._format_heading),
-            ("列表", "Ctrl+Shift+L", self._format_list),
-            ("链接", "Ctrl+K", self._insert_link),
-            ("插图", "Ctrl+Shift+I", self.insert_image),
-        ):
-            self._action(toolbar, label, shortcut, callback)
-        toolbar.addSeparator()
-        self._action(toolbar, "插页", "Ctrl+Shift+N", self.insert_page)
-        self._action(toolbar, "撕页", "Ctrl+Shift+D", self.remove_page)
-        toolbar.addSeparator()
-        toolbar.addWidget(QLabel("  纸张  "))
-        self.paper_combo = QComboBox()
-        for label, value in (("空白", "plain"), ("横线", "ruled"), ("方格", "grid")):
-            self.paper_combo.addItem(label, value)
-        self.paper_combo.setCurrentIndex(1)
-        self.paper_combo.currentIndexChanged.connect(self._change_paper)
-        toolbar.addWidget(self.paper_combo)
+        self._install_actions()
 
         splitter = QSplitter()
         sidebar = QFrame()
@@ -127,6 +142,65 @@ class NotebookWindow(QMainWindow):
         splitter.setSizes([210, 1150])
         self.setCentralWidget(splitter)
 
+    def _install_actions(self) -> None:
+        self.actions_by_name = {}
+        definitions = (
+            ("new", "新建", "Ctrl+N", self.new_book), ("open", "打开", "Ctrl+O", self.open_book),
+            ("save", "保存", "Ctrl+S", self.save_book), ("save_as", "另存为", "Ctrl+Shift+S", self.save_book_as),
+            ("bold", "粗体", "Ctrl+B", lambda: self._format_char("bold")),
+            ("italic", "斜体", "Ctrl+I", lambda: self._format_char("italic")),
+            ("list", "列表", "Ctrl+Shift+L", self._format_list),
+            ("link", "链接", "Ctrl+K", self._insert_link), ("image", "插图", "Ctrl+Shift+I", self.insert_image),
+            ("red", "红色文字", "Ctrl+Shift+R", self._toggle_red_text),
+            ("insert_page", "插入页面", "Ctrl+Shift+N", self.insert_page), ("remove_page", "撕掉页面", "Ctrl+Shift+D", self.remove_page),
+            ("toggle_toc", "显示/隐藏目录", "Ctrl+Shift+O", self.toggle_toc),
+            ("shortcuts", "快捷键说明", "F1", self.show_shortcuts),
+        )
+        for key, label, shortcut, callback in definitions:
+            self.actions_by_name[key] = self._action(None, label, shortcut, callback)
+        self.paper_combo = QComboBox()
+        for label, value in (("空白", "plain"), ("横线", "ruled"), ("方格", "grid")):
+            self.paper_combo.addItem(label, value)
+        self.paper_combo.setCurrentIndex(1)
+        self.paper_combo.currentIndexChanged.connect(self._change_paper)
+
+    def contextMenuEvent(self, event) -> None:
+        self._show_context_menu(event.globalPos())
+
+    def _show_context_menu(self, global_pos) -> None:
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        file_menu = menu.addMenu("文件")
+        for key in ("new", "open", "save", "save_as"):
+            file_menu.addAction(self.actions_by_name[key])
+        edit_menu = menu.addMenu("编辑")
+        for key in ("bold", "italic", "list", "link", "image", "red"):
+            edit_menu.addAction(self.actions_by_name[key])
+        page_menu = menu.addMenu("页面")
+        page_menu.addAction(self.actions_by_name["insert_page"])
+        page_menu.addAction(self.actions_by_name["remove_page"])
+        paper_menu = menu.addMenu("纸张")
+        for index in range(self.paper_combo.count()):
+            action = paper_menu.addAction(self.paper_combo.itemText(index))
+            action.setCheckable(True)
+            action.setChecked(index == self.paper_combo.currentIndex())
+            action.triggered.connect(lambda checked=False, i=index: self.paper_combo.setCurrentIndex(i))
+        menu.addSeparator()
+        menu.addAction(self.actions_by_name["toggle_toc"])
+        menu.addAction(self.actions_by_name["shortcuts"])
+        menu.exec(global_pos)
+
+    def toggle_toc(self) -> None:
+        sidebar = self.chapters.parentWidget()
+        while sidebar and sidebar.objectName() != "sidebar":
+            sidebar = sidebar.parentWidget()
+        if sidebar:
+            sidebar.setVisible(not sidebar.isVisible())
+
+    def show_shortcuts(self) -> None:
+        text = "\n".join(f"{action.text()}\t{action.shortcut().toString()}" for action in self.actions_by_name.values())
+        QMessageBox.information(self, "快捷键说明", text)
+
     def _action(self, toolbar: QToolBar | None, label: str, shortcut: str, callback) -> QAction:
         action = QAction(label, self)
         action.setShortcut(shortcut)
@@ -140,6 +214,9 @@ class NotebookWindow(QMainWindow):
         if page.id not in self.page_widgets:
             widget = PageWidget(page, number, self.book.paper_style, self.book.images)
             widget.changed.connect(self._page_changed)
+            widget.contextMenuRequested.connect(self._show_context_menu)
+            widget.body_edit.imagePasted.connect(lambda image, data, editor=widget.body_edit: self._insert_image_data(editor, image, data))
+            widget.body_edit.imageDoubleClicked.connect(self._show_image_fullscreen)
             self.page_widgets[page.id] = widget
         widget = self.page_widgets[page.id]
         widget.set_number(number)
@@ -245,12 +322,15 @@ class NotebookWindow(QMainWindow):
         editor.mergeCurrentCharFormat(fmt)
         editor.setFocus()
 
-    def _format_heading(self) -> None:
+    def _toggle_red_text(self) -> None:
         editor = self._active_editor()
-        cursor = editor.textCursor()
-        fmt = QTextBlockFormat()
-        fmt.setHeadingLevel(2)
-        cursor.setBlockFormat(fmt)
+        fmt = QTextCharFormat()
+        current = editor.currentCharFormat().foreground().color()
+        if current.isValid() and current.name().lower() == "#d33b32":
+            fmt.clearForeground()
+        else:
+            fmt.setForeground(QColor("#d33b32"))
+        editor.mergeCurrentCharFormat(fmt)
         editor.setFocus()
 
     def _format_list(self) -> None:
@@ -331,14 +411,34 @@ class NotebookWindow(QMainWindow):
         if len(data) > MAX_IMAGE_BYTES or image.isNull() or image.width() == 0:
             QMessageBox.warning(self, "无法插入", "图片无效或大于 30 MB。")
             return
+        index = self._active_index()
+        editor = self._page_widget(self.book.pages[index], index + 1).body_edit
+        self._insert_image_data(editor, image, data)
+
+    def _insert_image_data(self, editor, image: QImage, data: bytes) -> None:
+        if len(data) > MAX_IMAGE_BYTES or image.isNull() or image.width() == 0:
+            QMessageBox.warning(self, "无法插入", "图片无效或大于 30 MB。")
+            return
         name = uuid4().hex
         self.book.images[name] = data
         for widget in self.page_widgets.values():
             widget.body_edit.document().addResource(
                 QTextDocument.ResourceType.ImageResource, QUrl(f"book-image:{name}"), image
             )
-        index = self._active_index()
-        self._page_widget(self.book.pages[index], index + 1).insert_image(name, image)
+        page_widget = next((widget for widget in self.page_widgets.values() if widget.body_edit is editor), None)
+        if page_widget is None:
+            page_widget = self._page_widget(self.book.pages[self._active_index()], self._active_index() + 1)
+        page_widget.insert_image(name, image)
+        self.dirty = True
+        self._update_title()
+
+    def _show_image_fullscreen(self, name: str) -> None:
+        data = self.book.images.get(name)
+        image = QImage.fromData(data) if data else QImage()
+        if image.isNull():
+            return
+        dialog = ImagePreviewDialog(image, self)
+        dialog.exec()
 
     def _maybe_save(self) -> bool:
         if not self.dirty:
@@ -474,7 +574,6 @@ class NotebookWindow(QMainWindow):
             del self.book.pages[next_index]
         self.dirty = True
         self._update_title()
-        self._show_spread()
         return True
 
     def _overflow_page(self, index: int) -> bool:
@@ -483,6 +582,7 @@ class NotebookWindow(QMainWindow):
         if limit < 100:
             return False
         moved = False
+        focus_target = None
         for _ in range(500):
             document = source.document()
             height = document.documentLayout().documentSize().height()
@@ -492,13 +592,22 @@ class NotebookWindow(QMainWindow):
             if next_index == len(self.book.pages) or self.book.pages[next_index].manual:
                 self.book.pages.insert(next_index, Page(manual=False))
             target = self._page_widget(self.book.pages[next_index], next_index + 1).body_edit
-            block = document.lastBlock()
-            start = block.position()
-            if start == 0:
-                if len(block.text()) < 2:
+            block = document.firstBlock()
+            overflow_block = None
+            while block.isValid():
+                geometry = document.documentLayout().blockBoundingRect(block)
+                if geometry.bottom() > limit:
+                    overflow_block = block
                     break
-                fraction = max(0.2, min(0.8, limit / height * 0.8))
-                start = max(1, int(len(block.text()) * fraction))
+                block = block.next()
+            if overflow_block is None:
+                break
+            start = overflow_block.position()
+            if start == 0:
+                text = overflow_block.text()
+                if len(text) < 2:
+                    break
+                start = max(1, int(len(text) * max(0.2, min(0.8, limit / height * 0.8))))
             cursor = QTextCursor(document)
             cursor.setPosition(start)
             cursor.setPosition(document.characterCount() - 1, QTextCursor.MoveMode.KeepAnchor)
@@ -507,7 +616,7 @@ class NotebookWindow(QMainWindow):
                 break
             was_typing_at_end = source.hasFocus() and source.textCursor().position() >= start
             cursor.removeSelectedText()
-            if block.position() > 0 and cursor.block().text() == "":
+            if overflow_block.position() > 0 and cursor.block().text() == "":
                 cursor.deletePreviousChar()
             destination = QTextCursor(target.document())
             destination.setPosition(0)
@@ -521,11 +630,12 @@ class NotebookWindow(QMainWindow):
             self.dirty = True
             self._update_title()
             if was_typing_at_end:
-                self.spread_start = next_index // 2 * 2
-                self._show_spread()
-                target.setFocus()
-                target.moveCursor(QTextCursor.MoveOperation.End)
+                focus_target = target
                 break
-        if moved:
+        if moved and focus_target is not None:
+            self.spread_start = next_index // 2 * 2
             self._show_spread()
+            page_widget = self._page_widget(self.book.pages[next_index], next_index + 1)
+            page_widget.body_edit.setFocus()
+            page_widget.body_edit.moveCursor(QTextCursor.MoveOperation.End)
         return moved
