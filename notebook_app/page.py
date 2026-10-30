@@ -1,10 +1,10 @@
 import re
 
 from PySide6.QtCore import Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QDesktopServices, QFont, QImage, QPainter, QPen, QTextCursor, QTextDocument, QTextImageFormat
+from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QDesktopServices, QFont, QFontMetricsF, QImage, QPainter, QPen, QTextBlockFormat, QTextCharFormat, QTextCursor, QTextDocument, QTextImageFormat
 from PySide6.QtWidgets import QFrame, QLineEdit, QTextEdit, QVBoxLayout
 
-from notebook_app.model import Page
+from notebook_app.model import Page, Typography
 
 
 class PageEditor(QTextEdit):
@@ -15,10 +15,6 @@ class PageEditor(QTextEdit):
     def __init__(self) -> None:
         super().__init__()
         self.setAcceptDrops(True)
-
-    def scrollContentsBy(self, dx: int, dy: int) -> None:
-        # A paper page has a fixed writing area. Overflow is moved to the next page.
-        return
 
     def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Escape:
@@ -120,10 +116,11 @@ class PageWidget(QFrame):
     changed = Signal()
     contextMenuRequested = Signal(object)
 
-    def __init__(self, page: Page, number: int, paper_style: str, images: dict[str, bytes]) -> None:
+    def __init__(self, page: Page, number: int, paper_style: str, images: dict[str, bytes], typography: Typography) -> None:
         super().__init__()
         self.page = page
         self.paper_style = paper_style
+        self.typography = typography
         self.setObjectName("paperPage")
         self.setMinimumWidth(300)
         self.setFrameShape(QFrame.Shape.NoFrame)
@@ -140,6 +137,7 @@ class PageWidget(QFrame):
         self.body_edit.setPlaceholderText("开始写作...")
         self.body_edit.setFrameShape(QFrame.Shape.NoFrame)
         self.body_edit.setObjectName("pageBody")
+        self.body_edit.verticalScrollBar().valueChanged.connect(self.update)
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.title_edit.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.body_edit.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -159,6 +157,7 @@ class PageWidget(QFrame):
                 self.body_edit.document().addResource(
                     QTextDocument.ResourceType.ImageResource, QUrl(f"book-image:{name}"), image
                 )
+        self.apply_typography(typography)
         layout.addWidget(self.title_edit)
         layout.addWidget(self.body_edit, 1)
         self.number = number
@@ -182,6 +181,45 @@ class PageWidget(QFrame):
         self.paper_style = style
         self.update()
 
+    def apply_typography(self, typography: Typography) -> None:
+        self.typography = typography
+        editor = self.body_edit
+        document = editor.document()
+        cursor = editor.textCursor()
+        typing_format = editor.currentCharFormat()
+        scroll_value = editor.verticalScrollBar().value()
+        font = QFont(editor.font())
+        if typography.font_family:
+            font.setFamily(typography.font_family)
+        font.setPointSize(typography.font_size)
+
+        document.setUndoRedoEnabled(False)
+        try:
+            editor.setFont(font)
+            document.setDefaultFont(font)
+            all_text = QTextCursor(document)
+            all_text.select(QTextCursor.SelectionType.Document)
+            character = QTextCharFormat()
+            character.setFontFamilies([font.family()])
+            character.setFontPointSize(typography.font_size)
+            block = QTextBlockFormat()
+            block.setLineHeight(float(typography.line_spacing), QTextBlockFormat.LineHeightTypes.ProportionalHeight.value)
+            all_text.mergeCharFormat(character)
+            all_text.mergeBlockFormat(block)
+            editor.setTextCursor(cursor)
+            if not cursor.hasSelection():
+                typing_format.setFontFamilies([font.family()])
+                typing_format.setFontPointSize(typography.font_size)
+                editor.setCurrentCharFormat(typing_format)
+        finally:
+            document.setUndoRedoEnabled(True)
+        if editor.hasFocus():
+            editor.ensureCursorVisible()
+        else:
+            editor.verticalScrollBar().setValue(scroll_value)
+        self._body_changed()
+        self.update()
+
     def insert_image(self, name: str, image) -> None:
         url = f"book-image:{name}"
         self.body_edit.document().addResource(QTextDocument.ResourceType.ImageResource, QUrl(url), image)
@@ -200,7 +238,15 @@ class PageWidget(QFrame):
         painter.drawRect(self.rect().adjusted(0, 0, -1, -1))
         painter.setPen(QPen(QColor("#d5d8ce"), 1))
         if self.paper_style in ("ruled", "grid"):
-            for y in range(128, self.height() - 35, 28):
+            if self.paper_style == "ruled":
+                metrics = QFontMetricsF(self.body_edit.font())
+                step = max(22, round(metrics.height() * self.typography.line_spacing / 100))
+            else:
+                step = 28
+            body_top = self.body_edit.geometry().top()
+            first_line = body_top + round(QFontMetricsF(self.body_edit.font()).ascent()) + 8
+            first_line -= self.body_edit.verticalScrollBar().value() % step
+            for y in range(first_line, self.height() - 35, step):
                 painter.drawLine(42, y, self.width() - 40, y)
         if self.paper_style == "grid":
             for x in range(48, self.width() - 35, 28):

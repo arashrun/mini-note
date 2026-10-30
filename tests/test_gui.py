@@ -14,6 +14,8 @@ if HAS_QT:
     from PySide6.QtWidgets import QApplication
 
     from notebook_app.storage import load_book
+    from notebook_app.model import Typography
+    from notebook_app.typography_dialog import TypographyDialog
     from notebook_app.window import NotebookWindow
 
 
@@ -46,30 +48,50 @@ class GuiTests(unittest.TestCase):
         self.assertEqual(restored.pages[0].title, "序章")
         self.assertIn("第一段", restored.pages[0].body)
 
-    def test_overflow_creates_following_page(self):
+    def test_long_text_stays_on_page_and_scrolls(self):
+        from PySide6.QtCore import QPoint, QPointF, Qt
+        from PySide6.QtGui import QWheelEvent
         first = self.window.page_widgets[self.window.book.pages[0].id]
         first.body_edit.setPlainText("\n".join(f"第 {i} 段正文" for i in range(80)))
-        for _ in range(5):
-            self.app.processEvents()
-        self.assertGreater(len(self.window.book.pages), 2)
-        self.assertFalse(self.window.book.pages[1].manual)
-        for page in self.window.book.pages[:2]:
-            editor = self.window.page_widgets[page.id].body_edit
-            self.assertLessEqual(editor.document().size().height(), editor.viewport().height())
-        body = "".join(page.body for page in self.window.book.pages)
-        numbers = [int(value) for value in re.findall(r"第 ([0-9]+) 段正文", body)]
+        self.app.processEvents()
+        self.assertEqual(len(self.window.book.pages), 2)
+        self.assertGreater(first.body_edit.verticalScrollBar().maximum(), 0)
+        self.assertFalse(first.body_edit.verticalScrollBar().isVisible())
+        first.body_edit.verticalScrollBar().setValue(0)
+        wheel = QWheelEvent(
+            QPointF(10, 10), QPointF(first.body_edit.viewport().mapToGlobal(QPoint(10, 10))),
+            QPoint(), QPoint(0, -120), Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier, Qt.ScrollPhase.ScrollUpdate, False,
+        )
+        self.app.sendEvent(first.body_edit.viewport(), wheel)
+        self.assertGreater(first.body_edit.verticalScrollBar().value(), 0)
+        first.body_edit.verticalScrollBar().setValue(first.body_edit.verticalScrollBar().maximum())
+        self.assertGreater(first.body_edit.verticalScrollBar().value(), 0)
+        second = self.window.page_widgets[self.window.book.pages[1].id].body_edit
+        self.assertEqual(second.verticalScrollBar().value(), 0)
+        numbers = [int(value) for value in re.findall(r"第 ([0-9]+) 段正文", self.window.book.pages[0].body)]
         self.assertEqual(sorted(numbers), list(range(80)))
+        self.assertEqual(self.window.book.pages[1].body.strip(), "")
 
-    def test_blank_lines_also_trigger_page_overflow(self):
+    def test_blank_lines_scroll_without_creating_page(self):
         first = self.window.page_widgets[self.window.book.pages[0].id]
         first.body_edit.setPlainText("上" + "\n" * 100 + "下")
-        for _ in range(6):
-            self.app.processEvents()
-        self.assertGreater(len(self.window.book.pages), 2)
-        for page in self.window.book.pages:
-            widget = self.window.page_widgets.get(page.id)
-            if widget:
-                self.assertLessEqual(widget.body_edit.document().size().height(), widget.body_edit.viewport().height())
+        self.app.processEvents()
+        self.assertEqual(len(self.window.book.pages), 2)
+        self.assertGreater(first.body_edit.verticalScrollBar().maximum(), 0)
+        self.assertTrue(first.body_edit.toPlainText().endswith("下"))
+
+    def test_scroll_position_survives_spread_navigation(self):
+        first = self.window.page_widgets[self.window.book.pages[0].id].body_edit
+        first.setPlainText("\n".join("正文" for _ in range(80)))
+        self.app.processEvents()
+        first.verticalScrollBar().setValue(first.verticalScrollBar().maximum())
+        position = first.verticalScrollBar().value()
+        self.window.book.insert_page(1)
+        self.window.next_spread()
+        self.window.previous_spread()
+        self.app.processEvents()
+        self.assertEqual(first.verticalScrollBar().value(), position)
 
     def test_inserted_image_is_embedded_in_book(self):
         image = QImage(16, 16, QImage.Format.Format_RGB32)
@@ -184,7 +206,7 @@ class GuiTests(unittest.TestCase):
         QTest.keyClick(editor, Qt.Key.Key_0, Qt.KeyboardModifier.AltModifier)
         self.assertEqual(editor.currentCharFormat().foreground().color().name(), "#26322f")
 
-    def test_pagination_keeps_active_color_and_weight(self):
+    def test_scrolling_keeps_active_color_and_weight(self):
         from PySide6.QtGui import QTextCursor
         editor = self.window.page_widgets[self.window.book.pages[0].id].body_edit
         editor.setFocus()
@@ -192,12 +214,11 @@ class GuiTests(unittest.TestCase):
         editor.moveCursor(QTextCursor.MoveOperation.End)
         self.window._set_text_color("#d33b32")
         self.window._format_char("bold")
-        for _ in range(12):
-            self.app.processEvents()
-        continued = self.window._active_editor()
-        self.assertIs(self.window.focusWidget(), continued)
-        self.assertEqual(continued.currentCharFormat().foreground().color().name(), "#d33b32")
-        self.assertGreater(continued.fontWeight(), 400)
+        self.app.processEvents()
+        self.assertEqual(len(self.window.book.pages), 2)
+        self.assertIs(self.window.focusWidget(), editor)
+        self.assertEqual(editor.currentCharFormat().foreground().color().name(), "#d33b32")
+        self.assertGreater(editor.fontWeight(), 400)
 
     def test_escape_does_not_recolor_selected_text(self):
         from PySide6.QtGui import QTextCursor
@@ -214,6 +235,61 @@ class GuiTests(unittest.TestCase):
         cursor.setPosition(2)
         self.assertEqual(cursor.charFormat().foreground().color().name(), "#246fb5")
         self.assertEqual(editor.currentCharFormat().foreground().color().name(), "#26322f")
+
+    def test_typography_changes_layout_and_clears_old_undo(self):
+        editor = self.window.page_widgets[self.window.book.pages[0].id].body_edit
+        editor.insertPlainText("第一段\n第二段")
+        self.assertTrue(editor.document().isUndoAvailable())
+        old_height = editor.document().size().height()
+        settings = Typography("", 17, 160)
+        self.window.apply_typography(settings)
+        self.app.processEvents()
+        self.assertEqual(self.window.book.typography, settings)
+        self.assertFalse(editor.document().isUndoAvailable())
+        self.assertGreater(editor.document().size().height(), old_height)
+        self.assertEqual(editor.textCursor().blockFormat().lineHeight(), 160)
+
+        editor.insertPlainText("后续")
+        self.assertTrue(editor.document().isUndoAvailable())
+        editor.undo()
+        self.assertEqual(editor.textCursor().blockFormat().lineHeight(), 160)
+
+    def test_typography_round_trip(self):
+        settings = Typography("", 15, 145)
+        self.window.apply_typography(settings)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "layout.mbook"
+            self.window.path = path
+            self.assertTrue(self.window.save_book())
+            self.window._replace_book(load_book(path), path)
+            self.app.processEvents()
+            self.assertEqual(self.window.book.typography, settings)
+            editor = self.window.page_widgets[self.window.book.pages[0].id].body_edit
+            self.assertEqual(editor.textCursor().blockFormat().lineHeight(), 145)
+
+    def test_typography_preserves_inline_color_and_weight(self):
+        from PySide6.QtGui import QTextCursor
+        editor = self.window.page_widgets[self.window.book.pages[0].id].body_edit
+        editor.setPlainText("第一段")
+        editor.setFocus()
+        cursor = editor.textCursor()
+        cursor.setPosition(0)
+        cursor.setPosition(3, QTextCursor.MoveMode.KeepAnchor)
+        editor.setTextCursor(cursor)
+        self.window._set_text_color("#246fb5")
+        self.window._format_char("bold")
+        self.window.apply_typography(Typography("", 17, 150))
+        cursor = editor.textCursor()
+        cursor.setPosition(1)
+        self.assertEqual(cursor.charFormat().foreground().color().name(), "#246fb5")
+        self.assertGreater(cursor.charFormat().fontWeight(), 400)
+        self.assertEqual(cursor.charFormat().fontPointSize(), 17)
+
+    def test_typography_dialog_collects_settings(self):
+        dialog = TypographyDialog(Typography(), self.window)
+        dialog.font_size.setValue(16)
+        dialog.line_spacing.setValue(150)
+        self.assertEqual(dialog.selected_typography(), Typography("", 16, 150))
 
 
 if __name__ == "__main__":

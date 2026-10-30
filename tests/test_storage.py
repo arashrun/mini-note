@@ -3,7 +3,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from notebook_app.model import Book, Page
+from notebook_app.model import Book, Page, Typography
 from notebook_app.storage import load_book, save_book
 
 
@@ -46,6 +46,23 @@ class StorageTests(unittest.TestCase):
                 archive.writestr("manifest.json", '{"version":1,"pages":[{"id":"../bad"}]}')
             with self.assertRaises(ValueError):
                 load_book(path)
+
+    def test_typography_round_trip(self):
+        book = Book(typography=Typography("Noto Serif SC", 15, 145))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "layout.mbook"
+            save_book(path, book)
+            restored = load_book(path)
+        self.assertEqual(restored.typography, book.typography)
+
+    def test_legacy_book_uses_default_typography(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "old.mbook"
+            with zipfile.ZipFile(path, "w") as archive:
+                archive.writestr("manifest.json", '{"version":1,"pages":[{"id":"a"}]}')
+                archive.writestr("pages/a.md", "Old text")
+            restored = load_book(path)
+        self.assertEqual(restored.typography, Typography())
 
 
 if __name__ == "__main__":

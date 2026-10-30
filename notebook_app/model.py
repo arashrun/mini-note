@@ -6,6 +6,13 @@ PAPER_STYLES = ("plain", "ruled", "grid")
 
 
 @dataclass
+class Typography:
+    font_family: str = ""
+    font_size: int = 11
+    line_spacing: int = 100
+
+
+@dataclass
 class Page:
     id: str = field(default_factory=lambda: uuid4().hex)
     title: str = ""
@@ -19,6 +26,7 @@ class Book:
     pages: list[Page] = field(default_factory=lambda: [Page(), Page()])
     paper_style: str = "ruled"
     images: dict[str, bytes] = field(default_factory=dict)
+    typography: Typography = field(default_factory=Typography)
 
     def __post_init__(self) -> None:
         self.ensure_spread()
