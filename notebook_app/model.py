@@ -11,6 +11,7 @@ class Page:
     title: str = ""
     body: str = ""
     manual: bool = True
+    html: str = ""
 
 
 @dataclass

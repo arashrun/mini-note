@@ -110,6 +110,25 @@ class GuiTests(unittest.TestCase):
             resource = page.body_edit.document().resource(QTextDocument.ResourceType.ImageResource, QUrl("book-image:sample"))
         self.assertIsNotNone(resource)
 
+    def test_reopen_preserves_blank_lines_and_red_text(self):
+        page = self.window.page_widgets[self.window.book.pages[0].id]
+        page.body_edit.setPlainText("上\n\n\n下")
+        page.body_edit.moveCursor(page.body_edit.textCursor().MoveOperation.End)
+        self.window._toggle_red_text()
+        page.body_edit.insertPlainText("红色")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "format.mbook"
+            self.window.path = path
+            self.assertTrue(self.window.save_book())
+            self.window._replace_book(load_book(path), path)
+            self.app.processEvents()
+            restored = self.window.page_widgets[self.window.book.pages[0].id].body_edit
+            self.assertEqual(restored.toPlainText(), "上\n\n\n下红色")
+            cursor = restored.textCursor()
+            cursor.movePosition(cursor.MoveOperation.End)
+            cursor.movePosition(cursor.MoveOperation.Left)
+            self.assertEqual(cursor.charFormat().foreground().color().name(), "#d33b32")
+
     def test_typed_link_becomes_blue_anchor(self):
         from PySide6.QtTest import QTest
         from PySide6.QtCore import Qt

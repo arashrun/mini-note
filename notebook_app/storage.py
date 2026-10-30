@@ -33,7 +33,9 @@ def load_book(path: str | Path) -> Book:
                 raise ValueError("Invalid page ID")
             seen_pages.add(page_id)
             body = archive.read(f"pages/{page_id}.md").decode("utf-8")
-            pages.append(Page(page_id, str(entry.get("title", "")), body, bool(entry.get("manual", True))))
+            html_name = f"pages/{page_id}.html"
+            html = archive.read(html_name).decode("utf-8") if html_name in archive.namelist() else ""
+            pages.append(Page(page_id, str(entry.get("title", "")), body, bool(entry.get("manual", True)), html))
         images = {}
         image_names = manifest.get("images", [])
         if not isinstance(image_names, list):
@@ -66,6 +68,7 @@ def save_book(path: str | Path, book: Book) -> None:
             archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False))
             for page in book.pages:
                 archive.writestr(f"pages/{page.id}.md", page.body)
+                archive.writestr(f"pages/{page.id}.html", page.html)
             for name, data in book.images.items():
                 archive.writestr(f"images/{name}", data)
         os.replace(temporary, path)

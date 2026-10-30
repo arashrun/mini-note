@@ -141,7 +141,13 @@ class PageWidget(QFrame):
         self.customContextMenuRequested.connect(lambda point: self.contextMenuRequested.emit(self.mapToGlobal(point)))
         self.title_edit.customContextMenuRequested.connect(lambda point: self.contextMenuRequested.emit(self.title_edit.mapToGlobal(point)))
         self.body_edit.customContextMenuRequested.connect(lambda point: self.contextMenuRequested.emit(self.body_edit.mapToGlobal(point)))
-        self.body_edit.setMarkdown(page.body)
+        for name, data in images.items():
+            image = QImage.fromData(data)
+            if not image.isNull():
+                self.body_edit.document().addResource(
+                    QTextDocument.ResourceType.ImageResource, QUrl(f"book-image:{name}"), image
+                )
+        self.body_edit.setHtml(page.html) if page.html else self.body_edit.setMarkdown(page.body)
         for name, data in images.items():
             image = QImage.fromData(data)
             if not image.isNull():
@@ -160,6 +166,7 @@ class PageWidget(QFrame):
 
     def _body_changed(self) -> None:
         self.page.body = self.body_edit.toMarkdown()
+        self.page.html = self.body_edit.toHtml()
         self.changed.emit()
 
     def set_number(self, number: int) -> None:

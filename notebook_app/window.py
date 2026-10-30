@@ -566,7 +566,9 @@ class NotebookWindow(QMainWindow):
             destination.insertBlock()
         destination.insertFragment(fragment)
         self.book.pages[index].body = source.toMarkdown()
+        self.book.pages[index].html = source.toHtml()
         target_page.body = target.toMarkdown()
+        target_page.html = target.toHtml()
         if not target.toPlainText().strip():
             widget = self.page_widgets.pop(target_page.id)
             widget.setParent(None)
@@ -583,6 +585,7 @@ class NotebookWindow(QMainWindow):
             return False
         moved = False
         focus_target = None
+        source_was_focused = source.hasFocus()
         for _ in range(500):
             document = source.document()
             height = document.documentLayout().documentSize().height()
@@ -614,7 +617,7 @@ class NotebookWindow(QMainWindow):
             fragment = QTextDocumentFragment(cursor)
             if fragment.isEmpty():
                 break
-            was_typing_at_end = source.hasFocus() and source.textCursor().position() >= start
+            was_editing = source.hasFocus() or source_was_focused
             cursor.removeSelectedText()
             if overflow_block.position() > 0 and cursor.block().text() == "":
                 cursor.deletePreviousChar()
@@ -626,13 +629,17 @@ class NotebookWindow(QMainWindow):
                 destination.insertBlock()
             moved = True
             self.book.pages[index].body = source.toMarkdown()
+            self.book.pages[index].html = source.toHtml()
             self.book.pages[next_index].body = target.toMarkdown()
+            self.book.pages[next_index].html = target.toHtml()
             self.dirty = True
             self._update_title()
-            if was_typing_at_end:
+            if was_editing:
                 focus_target = target
                 break
-        if moved and focus_target is not None:
+        if moved and (focus_target is not None or source_was_focused):
+            if focus_target is None:
+                focus_target = self._page_widget(self.book.pages[next_index], next_index + 1).body_edit
             self.spread_start = next_index // 2 * 2
             self._show_spread()
             page_widget = self._page_widget(self.book.pages[next_index], next_index + 1)
