@@ -10,6 +10,7 @@ from notebook_app.model import Page
 class PageEditor(QTextEdit):
     imagePasted = Signal(object, bytes)
     imageDoubleClicked = Signal(str)
+    deactivateStyleRequested = Signal()
 
     def __init__(self) -> None:
         super().__init__()
@@ -20,6 +21,10 @@ class PageEditor(QTextEdit):
         return
 
     def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.deactivateStyleRequested.emit()
+            event.accept()
+            return
         super().keyPressEvent(event)
         if event.text() == ")":
             self._format_typed_link()

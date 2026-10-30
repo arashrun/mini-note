@@ -114,7 +114,7 @@ class GuiTests(unittest.TestCase):
         page = self.window.page_widgets[self.window.book.pages[0].id]
         page.body_edit.setPlainText("上\n\n\n下")
         page.body_edit.moveCursor(page.body_edit.textCursor().MoveOperation.End)
-        self.window._toggle_red_text()
+        self.window._set_text_color("#d33b32")
         page.body_edit.insertPlainText("红色")
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "format.mbook"
@@ -148,9 +148,72 @@ class GuiTests(unittest.TestCase):
         page.body_edit.setFocus()
         QTest.keyClicks(page.body_edit, "# plain")
         self.assertEqual(page.body_edit.toPlainText(), "# plain")
-        self.window._toggle_red_text()
+        self.window._set_text_color("#d33b32")
         QTest.keyClicks(page.body_edit, " red")
         self.assertEqual(page.body_edit.currentCharFormat().foreground().color().name(), "#d33b32")
+
+    def test_color_shortcuts_and_escape_clear_one_active_layer(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        editor = self.window.page_widgets[self.window.book.pages[0].id].body_edit
+        editor.setFocus()
+        QTest.keyClick(editor, Qt.Key.Key_5, Qt.KeyboardModifier.AltModifier)
+        QTest.keyClick(editor, Qt.Key.Key_B, Qt.KeyboardModifier.ControlModifier)
+        QTest.keyClick(editor, Qt.Key.Key_I, Qt.KeyboardModifier.ControlModifier)
+        self.assertEqual(editor.currentCharFormat().foreground().color().name(), "#246fb5")
+        self.assertEqual(self.window.format_label.text(), "蓝色 · 粗体 · 斜体")
+
+        QTest.keyClick(editor, Qt.Key.Key_Escape)
+        self.assertEqual(editor.currentCharFormat().foreground().color().name(), "#26322f")
+        self.assertTrue(editor.fontItalic())
+        self.assertGreater(editor.fontWeight(), 400)
+        QTest.keyClick(editor, Qt.Key.Key_Escape)
+        self.assertEqual(editor.fontWeight(), 400)
+        self.assertTrue(editor.fontItalic())
+        QTest.keyClick(editor, Qt.Key.Key_Escape)
+        self.assertFalse(editor.fontItalic())
+        self.assertEqual(self.window.format_label.text(), "默认样式")
+
+    def test_alt_zero_returns_to_default_color(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        editor = self.window.page_widgets[self.window.book.pages[0].id].body_edit
+        editor.setFocus()
+        QTest.keyClick(editor, Qt.Key.Key_1, Qt.KeyboardModifier.AltModifier)
+        self.assertEqual(editor.currentCharFormat().foreground().color().name(), "#d33b32")
+        QTest.keyClick(editor, Qt.Key.Key_0, Qt.KeyboardModifier.AltModifier)
+        self.assertEqual(editor.currentCharFormat().foreground().color().name(), "#26322f")
+
+    def test_pagination_keeps_active_color_and_weight(self):
+        from PySide6.QtGui import QTextCursor
+        editor = self.window.page_widgets[self.window.book.pages[0].id].body_edit
+        editor.setFocus()
+        editor.setPlainText("\n".join("正文段落" for _ in range(80)))
+        editor.moveCursor(QTextCursor.MoveOperation.End)
+        self.window._set_text_color("#d33b32")
+        self.window._format_char("bold")
+        for _ in range(12):
+            self.app.processEvents()
+        continued = self.window._active_editor()
+        self.assertIs(self.window.focusWidget(), continued)
+        self.assertEqual(continued.currentCharFormat().foreground().color().name(), "#d33b32")
+        self.assertGreater(continued.fontWeight(), 400)
+
+    def test_escape_does_not_recolor_selected_text(self):
+        from PySide6.QtGui import QTextCursor
+        editor = self.window.page_widgets[self.window.book.pages[0].id].body_edit
+        editor.setPlainText("hello world")
+        editor.setFocus()
+        cursor = editor.textCursor()
+        cursor.setPosition(0)
+        cursor.setPosition(5, QTextCursor.MoveMode.KeepAnchor)
+        editor.setTextCursor(cursor)
+        self.window._set_text_color("#246fb5")
+        self.window._deactivate_style(editor)
+        cursor = editor.textCursor()
+        cursor.setPosition(2)
+        self.assertEqual(cursor.charFormat().foreground().color().name(), "#246fb5")
+        self.assertEqual(editor.currentCharFormat().foreground().color().name(), "#26322f")
 
 
 if __name__ == "__main__":

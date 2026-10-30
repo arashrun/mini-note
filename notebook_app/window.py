@@ -3,7 +3,7 @@ from uuid import uuid4
 from zipfile import BadZipFile
 
 from PySide6.QtCore import QPropertyAnimation, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QColor, QFont, QImage, QPainter, QPixmap, QTextCharFormat, QTextCursor, QTextDocument, QTextDocumentFragment, QTextListFormat
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QImage, QPainter, QPixmap, QTextCharFormat, QTextCursor, QTextDocument, QTextDocumentFragment, QTextListFormat
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFileDialog, QFrame, QGraphicsOpacityEffect, QHBoxLayout, QInputDialog,
     QLabel, QListWidget, QListWidgetItem, QMainWindow, QMessageBox, QPushButton,
@@ -13,6 +13,19 @@ from PySide6.QtWidgets import (
 from notebook_app.model import Book, Page
 from notebook_app.page import PageWidget
 from notebook_app.storage import MAX_IMAGE_BYTES, load_book, save_book
+
+
+DEFAULT_INK = "#26322f"
+TEXT_COLORS = (
+    ("默认", None),
+    ("红色", "#d33b32"),
+    ("橙色", "#bd5a27"),
+    ("金色", "#92700a"),
+    ("绿色", "#288052"),
+    ("蓝色", "#246fb5"),
+    ("紫色", "#7953a6"),
+    ("灰色", "#687078"),
+)
 
 
 class ImagePreviewDialog(QDialog):
@@ -69,6 +82,8 @@ class NotebookWindow(QMainWindow):
         self.spread_start = 0
         self.page_widgets: dict[str, PageWidget] = {}
         self._last_active_page_id: str | None = None
+        self._pending_focus_page_id: str | None = None
+        self._pending_typing_format: QTextCharFormat | None = None
         self._reflow_pending = False
         self._building = False
         self.resize(1360, 850)
@@ -137,6 +152,10 @@ class NotebookWindow(QMainWindow):
         self.position_label.setStyleSheet("color: #e0e9e2;")
         nav_layout.insertWidget(2, self.position_label)
         nav_layout.insertStretch(3)
+        self.format_label = QLabel()
+        self.format_label.setFixedWidth(170)
+        self.format_label.setStyleSheet("color: #bed2c5;")
+        nav_layout.insertWidget(1, self.format_label)
         book_layout.addWidget(nav)
         splitter.addWidget(book_area)
         splitter.setSizes([210, 1150])
@@ -151,13 +170,21 @@ class NotebookWindow(QMainWindow):
             ("italic", "斜体", "Ctrl+I", lambda: self._format_char("italic")),
             ("list", "列表", "Ctrl+Shift+L", self._format_list),
             ("link", "链接", "Ctrl+K", self._insert_link), ("image", "插图", "Ctrl+Shift+I", self.insert_image),
-            ("red", "红色文字", "Ctrl+Shift+R", self._toggle_red_text),
             ("insert_page", "插入页面", "Ctrl+Shift+N", self.insert_page), ("remove_page", "撕掉页面", "Ctrl+Shift+D", self.remove_page),
             ("toggle_toc", "显示/隐藏目录", "Ctrl+Shift+O", self.toggle_toc),
             ("shortcuts", "快捷键说明", "F1", self.show_shortcuts),
         )
         for key, label, shortcut, callback in definitions:
             self.actions_by_name[key] = self._action(None, label, shortcut, callback)
+        for number, (label, color) in enumerate(TEXT_COLORS):
+            action = self._action(
+                None, f"文字颜色：{label}", f"Alt+{number}",
+                lambda checked=False, value=color: self._set_text_color(value),
+            )
+            swatch = QPixmap(14, 14)
+            swatch.fill(QColor(color or DEFAULT_INK))
+            action.setIcon(QIcon(swatch))
+            self.actions_by_name[f"color_{number}"] = action
         self.paper_combo = QComboBox()
         for label, value in (("空白", "plain"), ("横线", "ruled"), ("方格", "grid")):
             self.paper_combo.addItem(label, value)
@@ -174,8 +201,11 @@ class NotebookWindow(QMainWindow):
         for key in ("new", "open", "save", "save_as"):
             file_menu.addAction(self.actions_by_name[key])
         edit_menu = menu.addMenu("编辑")
-        for key in ("bold", "italic", "list", "link", "image", "red"):
+        for key in ("bold", "italic", "list", "link", "image"):
             edit_menu.addAction(self.actions_by_name[key])
+        colors_menu = edit_menu.addMenu("文字颜色")
+        for number in range(len(TEXT_COLORS)):
+            colors_menu.addAction(self.actions_by_name[f"color_{number}"])
         page_menu = menu.addMenu("页面")
         page_menu.addAction(self.actions_by_name["insert_page"])
         page_menu.addAction(self.actions_by_name["remove_page"])
@@ -217,6 +247,8 @@ class NotebookWindow(QMainWindow):
             widget.contextMenuRequested.connect(self._show_context_menu)
             widget.body_edit.imagePasted.connect(lambda image, data, editor=widget.body_edit: self._insert_image_data(editor, image, data))
             widget.body_edit.imageDoubleClicked.connect(self._show_image_fullscreen)
+            widget.body_edit.deactivateStyleRequested.connect(lambda editor=widget.body_edit: self._deactivate_style(editor))
+            widget.body_edit.currentCharFormatChanged.connect(lambda fmt, editor=widget.body_edit: self._update_format_label(editor))
             self.page_widgets[page.id] = widget
         widget = self.page_widgets[page.id]
         widget.set_number(number)
@@ -245,6 +277,7 @@ class NotebookWindow(QMainWindow):
                 self.spread_layout.addWidget(blank, 1)
         self.position_label.setText(f"{self.spread_start + 1}–{min(self.spread_start + 2, len(self.book.pages))} / {len(self.book.pages)}")
         self._refresh_chapters()
+        self._update_format_label(self._active_editor())
         if animate:
             effect = QGraphicsOpacityEffect(self.spread)
             self.spread.setGraphicsEffect(effect)
@@ -266,6 +299,7 @@ class NotebookWindow(QMainWindow):
 
     def _jump_to_chapter(self, item) -> None:
         index = item.data(Qt.ItemDataRole.UserRole)
+        self._pending_focus_page_id = None
         self.spread_start = index - index % 2
         self._show_spread(True)
 
@@ -291,11 +325,13 @@ class NotebookWindow(QMainWindow):
         focus = self.focusWidget()
         for index, page in enumerate(self.book.pages):
             widget = self.page_widgets.get(page.id)
-            if widget and focus and (focus is widget.title_edit or focus is widget.body_edit or widget.body_edit.isAncestorOf(focus)):
+            if widget and focus and self.spread_start <= index < self.spread_start + 2 and (
+                focus is widget.title_edit or focus is widget.body_edit or widget.body_edit.isAncestorOf(focus)
+            ):
                 return index
         if self._last_active_page_id:
             for index, page in enumerate(self.book.pages):
-                if page.id == self._last_active_page_id:
+                if page.id == self._last_active_page_id and self.spread_start <= index < self.spread_start + 2:
                     return index
         return self.spread_start
 
@@ -306,6 +342,7 @@ class NotebookWindow(QMainWindow):
             widget = self.page_widgets.get(page.id)
             if widget and (current is widget.title_edit or current is widget.body_edit or widget.body_edit.isAncestorOf(current)):
                 self._last_active_page_id = page.id
+                self._update_format_label(widget.body_edit)
                 return
 
     def _active_editor(self):
@@ -321,17 +358,48 @@ class NotebookWindow(QMainWindow):
             fmt.setFontItalic(not editor.fontItalic())
         editor.mergeCurrentCharFormat(fmt)
         editor.setFocus()
+        self._update_format_label(editor)
 
-    def _toggle_red_text(self) -> None:
+    def _set_text_color(self, color: str | None) -> None:
         editor = self._active_editor()
         fmt = QTextCharFormat()
-        current = editor.currentCharFormat().foreground().color()
-        if current.isValid() and current.name().lower() == "#d33b32":
-            fmt.clearForeground()
-        else:
-            fmt.setForeground(QColor("#d33b32"))
+        fmt.setForeground(QColor(color or DEFAULT_INK))
         editor.mergeCurrentCharFormat(fmt)
         editor.setFocus()
+        self._update_format_label(editor)
+
+    def _deactivate_style(self, editor) -> None:
+        cursor = editor.textCursor()
+        if cursor.hasSelection():
+            cursor.clearSelection()
+            editor.setTextCursor(cursor)
+        current = editor.currentCharFormat()
+        color = current.foreground().color()
+        fmt = QTextCharFormat()
+        if color.isValid() and color.name().lower() not in (DEFAULT_INK, "#000000"):
+            fmt.setForeground(QColor(DEFAULT_INK))
+        elif current.fontWeight() > QFont.Weight.Normal:
+            fmt.setFontWeight(QFont.Weight.Normal)
+        elif current.fontItalic():
+            fmt.setFontItalic(False)
+        else:
+            return
+        editor.mergeCurrentCharFormat(fmt)
+        self._update_format_label(editor)
+
+    def _update_format_label(self, editor) -> None:
+        if not hasattr(self, "format_label"):
+            return
+        current = editor.currentCharFormat()
+        color = current.foreground().color()
+        active = []
+        if color.isValid() and color.name().lower() not in (DEFAULT_INK, "#000000"):
+            active.append(next((name for name, value in TEXT_COLORS if value == color.name().lower()), "自定义颜色"))
+        if current.fontWeight() > QFont.Weight.Normal:
+            active.append("粗体")
+        if current.fontItalic():
+            active.append("斜体")
+        self.format_label.setText(" · ".join(active) if active else "默认样式")
 
     def _format_list(self) -> None:
         editor = self._active_editor()
@@ -369,11 +437,13 @@ class NotebookWindow(QMainWindow):
 
     def previous_spread(self) -> None:
         if self.spread_start >= 2:
+            self._pending_focus_page_id = None
             self.spread_start -= 2
             self._show_spread(True)
 
     def next_spread(self) -> None:
         if self.spread_start + 2 < len(self.book.pages):
+            self._pending_focus_page_id = None
             self.spread_start += 2
             self._show_spread(True)
 
@@ -498,6 +568,8 @@ class NotebookWindow(QMainWindow):
             widget.deleteLater()
         self.page_widgets.clear()
         self._last_active_page_id = None
+        self._pending_focus_page_id = None
+        self._pending_typing_format = None
         self.book = book
         self.path = path
         self.dirty = False
@@ -537,6 +609,28 @@ class NotebookWindow(QMainWindow):
             self._building = False
         if changed:
             self._schedule_reflow()
+        else:
+            self._restore_pending_focus()
+
+    def _restore_pending_focus(self) -> None:
+        page_id = self._pending_focus_page_id
+        if page_id is None:
+            return
+        self._pending_focus_page_id = None
+        index = next((i for i, page in enumerate(self.book.pages) if page.id == page_id), None)
+        if index is None:
+            return
+        target_spread = index // 2 * 2
+        if self.spread_start != target_spread:
+            self.spread_start = target_spread
+            self._show_spread()
+        editor = self._page_widget(self.book.pages[index], index + 1).body_edit
+        editor.setFocus()
+        editor.moveCursor(QTextCursor.MoveOperation.End)
+        if self._pending_typing_format is not None:
+            editor.setCurrentCharFormat(self._pending_typing_format)
+        self._pending_typing_format = None
+        self._update_format_label(editor)
 
     def _pull_forward(self, index: int) -> bool:
         next_index = index + 1
@@ -545,7 +639,7 @@ class NotebookWindow(QMainWindow):
         source = self._page_widget(self.book.pages[index], index + 1).body_edit
         target_page = self.book.pages[next_index]
         target = self._page_widget(target_page, next_index + 1).body_edit
-        if target.hasFocus() or not target.toPlainText().strip():
+        if target.hasFocus() or target_page.id == self._pending_focus_page_id or not target.toPlainText().strip():
             return False
         limit = source.viewport().height() - 12
         first = target.document().firstBlock()
@@ -584,8 +678,8 @@ class NotebookWindow(QMainWindow):
         if limit < 100:
             return False
         moved = False
-        focus_target = None
-        source_was_focused = source.hasFocus()
+        source_was_focused = source.hasFocus() or self._pending_focus_page_id == self.book.pages[index].id
+        typing_format = source.currentCharFormat() if source.hasFocus() else self._pending_typing_format
         for _ in range(500):
             document = source.document()
             height = document.documentLayout().documentSize().height()
@@ -617,7 +711,7 @@ class NotebookWindow(QMainWindow):
             fragment = QTextDocumentFragment(cursor)
             if fragment.isEmpty():
                 break
-            was_editing = source.hasFocus() or source_was_focused
+            was_editing = source_was_focused
             cursor.removeSelectedText()
             if overflow_block.position() > 0 and cursor.block().text() == "":
                 cursor.deletePreviousChar()
@@ -635,14 +729,11 @@ class NotebookWindow(QMainWindow):
             self.dirty = True
             self._update_title()
             if was_editing:
-                focus_target = target
+                self._pending_focus_page_id = self.book.pages[next_index].id
+                self._pending_typing_format = typing_format
+                target_spread = next_index // 2 * 2
+                if target_spread != self.spread_start:
+                    self.spread_start = target_spread
+                    self._show_spread()
                 break
-        if moved and (focus_target is not None or source_was_focused):
-            if focus_target is None:
-                focus_target = self._page_widget(self.book.pages[next_index], next_index + 1).body_edit
-            self.spread_start = next_index // 2 * 2
-            self._show_spread()
-            page_widget = self._page_widget(self.book.pages[next_index], next_index + 1)
-            page_widget.body_edit.setFocus()
-            page_widget.body_edit.moveCursor(QTextCursor.MoveOperation.End)
         return moved
